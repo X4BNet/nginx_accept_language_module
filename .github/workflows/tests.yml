@@ -1,0 +1,46 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        nginx: ['1.26.3', '1.30.5']
+    env:
+      NGINX_VERSION: ${{ matrix.nginx }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpcre2-dev zlib1g-dev cpanminus
+          sudo cpanm --notest --mirror https://cpan.metacpan.org --mirror-only \
+            https://cpan.metacpan.org/authors/id/A/AG/AGENT/Test-Nginx-0.32.tar.gz
+
+      - name: Build Nginx with the module
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --show-error --silent --location --retry 3 \
+            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o nginx.tar.gz
+          tar -xzf nginx.tar.gz
+          cd "nginx-${NGINX_VERSION}"
+          ./configure --with-debug --add-module="$GITHUB_WORKSPACE"
+          make -j2
+
+      - name: Run behavioral tests
+        env:
+          TEST_NGINX_BINARY: ${{ runner.temp }}/nginx-${{ matrix.nginx }}/objs/nginx
+        run: prove -v t/*.t

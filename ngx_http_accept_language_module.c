@@ -8,7 +8,7 @@ static ngx_int_t ngx_http_accept_language_variable(ngx_http_request_t *r, ngx_ht
 static ngx_command_t  ngx_http_accept_language_commands[] = {
 
     { ngx_string("set_from_accept_language"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      NGX_HTTP_MAIN_CONF|NGX_CONF_1MORE,
       ngx_http_accept_language,
       NGX_HTTP_MAIN_CONF_OFFSET,
       0,
@@ -19,6 +19,7 @@ static ngx_command_t  ngx_http_accept_language_commands[] = {
 typedef struct ngx_http_accept_language_s {
   ngx_hash_t hash;
   ngx_str_t default_language;
+  size_t max_language_len;
 } ngx_http_accept_language_t;
 
 // No need for any configuration callback
@@ -44,7 +45,7 @@ ngx_module_t  ngx_http_accept_language_module = {
 static char * ngx_http_accept_language(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
   ngx_uint_t          i;
-  ngx_str_t           *value, *snew, name;
+  ngx_str_t           *value, *snew, name, key;
   ngx_http_variable_t *var;
   ngx_hash_init_t  hash;
   ngx_http_accept_language_t *al;
@@ -71,6 +72,7 @@ static char * ngx_http_accept_language(ngx_conf_t *cf, ngx_command_t *cmd, void 
   
   var->get_handler = ngx_http_accept_language_variable;
 
+  /* Build one hash per HTTP-level variable, shared by all HTTP servers. */
   al = ngx_pcalloc(cf->pool, sizeof(ngx_http_accept_language_t));
   if (al == NULL) {
       return NGX_CONF_ERROR;
@@ -79,18 +81,31 @@ static char * ngx_http_accept_language(ngx_conf_t *cf, ngx_command_t *cmd, void 
   hash_keys.pool = cf->pool;
   hash_keys.temp_pool = cf->temp_pool;
 
-  ngx_hash_keys_array_init(&hash_keys, NGX_HASH_SMALL);
+  if (ngx_hash_keys_array_init(&hash_keys, NGX_HASH_SMALL) != NGX_OK) {
+    return NGX_CONF_ERROR;
+  }
   
   for (i = 2; i < cf->args->nelts; i++) {
     if(al->default_language.len == 0){
       al->default_language = value[i];
+    }
+    if (value[i].len > al->max_language_len) {
+      al->max_language_len = value[i].len;
     }
     snew = ngx_palloc(cf->pool, sizeof(ngx_str_t));
     if (snew == NULL) {
       return NGX_CONF_ERROR;
     }
     *snew = value[i];
-    ngx_hash_add_key(&hash_keys, snew, snew, 0);
+
+    /* Hash lowercase keys without changing the configured return value. */
+    key.len = snew->len;
+    key.data = ngx_pstrdup(cf->temp_pool, snew);
+    if (key.data == NULL
+        || ngx_hash_add_key(&hash_keys, &key, snew, 0) == NGX_ERROR)
+    {
+      return NGX_CONF_ERROR;
+    }
   }
 
   hash.hash = &al->hash;
@@ -110,12 +125,86 @@ static char * ngx_http_accept_language(ngx_conf_t *cf, ngx_command_t *cmd, void 
   return NGX_CONF_OK;
 }
 
-static ngx_int_t ngx_http_accept_language_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) 
+static ngx_str_t *
+ngx_http_accept_language_lookup(ngx_http_accept_language_t *al, u_char *range,
+    size_t len)
 {
-  u_char            *start, *pos, *end;
+  u_char          c;
+  size_t          i, subtag;
+  ngx_uint_t      key, first;
+  ngx_hash_elt_t *elt;
+
+  if (len == 0 || al->hash.size == 0) {
+    return NULL;
+  }
+
+  /* RFC 4647 section 2.1: accept basic ranges only.  Skip "*" and
+   * extended/invalid ranges rather than truncating them into a match. */
+  subtag = 0;
+  first = 1;
+  for (i = 0; i < len; i++) {
+    c = ngx_tolower(range[i]);
+    if (c == '-') {
+      if (subtag == 0) {
+        return NULL;
+      }
+      subtag = 0;
+      first = 0;
+    } else {
+      if (!((c >= 'a' && c <= 'z')
+            || (!first && c >= '0' && c <= '9'))
+          || ++subtag > 8)
+      {
+        return NULL;
+      }
+    }
+  }
+  if (subtag == 0) {
+    return NULL;
+  }
+
+  while (len != 0) {
+    /* Longer candidates cannot match.  Avoid repeatedly hashing a long
+     * client-supplied range while truncating it to a supported length. */
+    if (len <= al->max_language_len) {
+      key = ngx_hash_key_lc(range, len);
+      elt = al->hash.buckets[key % al->hash.size];
+
+      /* ngx_hash_find requires a lowercase input.  Compare the bucket
+       * case-insensitively without copying or modifying the request header. */
+      if (elt != NULL) {
+        while (elt->value != NULL) {
+          if (len == (size_t) elt->len
+              && ngx_strncasecmp(range, elt->name, len) == 0)
+          {
+            return elt->value;
+          }
+          elt = (ngx_hash_elt_t *) ngx_align_ptr(elt->name + elt->len,
+                                               sizeof(void *));
+        }
+      }
+    }
+
+    /* RFC 4647 section 3.4: remove the rightmost subtag, together
+     * with any singleton (extension or private-use marker) left at the end. */
+    do {
+      while (len != 0 && range[len - 1] != '-') {
+        len--;
+      }
+      if (len != 0) {
+        len--;
+      }
+    } while (len == 1 || (len >= 2 && range[len - 2] == '-'));
+  }
+
+  return NULL;
+}
+
+static ngx_int_t ngx_http_accept_language_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data)
+{
+  u_char            *start, *pos, *end, *range_end;
   ngx_http_accept_language_t    *al = (ngx_http_accept_language_t *) data;
   ngx_str_t         *l;
-  ngx_uint_t   key;
 
 
   if ( NULL != r->headers_in.accept_language ) {       
@@ -123,15 +212,20 @@ static ngx_int_t ngx_http_accept_language_variable(ngx_http_request_t *r, ngx_ht
     end = start + r->headers_in.accept_language->value.len;
 
     while (start < end) {
-      // eating spaces
-      while (start < end && *start == ' ') {start++; }
+      while (start < end && (*start == ' ' || *start == '\t')) {start++; }
       
       pos = start;
     
       while (pos < end && *pos != ',' && *pos != ';') { pos++; }
     
-      key = ngx_hash_key(start, end - start);
-      l = (ngx_str_t *)ngx_hash_find(&al->hash, key, start, end - start);
+      range_end = pos;
+      while (range_end > start
+             && (range_end[-1] == ' ' || range_end[-1] == '\t'))
+      {
+        range_end--;
+      }
+
+      l = ngx_http_accept_language_lookup(al, start, range_end - start);
       if(l != NULL){
         v->data = l->data;
         v->len  = l->len;
@@ -139,10 +233,10 @@ static ngx_int_t ngx_http_accept_language_variable(ngx_http_request_t *r, ngx_ht
       }
     
       // We discard the quality value
-      if (*pos == ';') {
+      if (pos < end && *pos == ';') {
         while (pos < end && *pos != ',') {pos++; }
       }
-      if (*pos == ',') {
+      if (pos < end && *pos == ',') {
         pos++;
       }
       
