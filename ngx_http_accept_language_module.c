@@ -205,11 +205,14 @@ static ngx_int_t ngx_http_accept_language_variable(ngx_http_request_t *r, ngx_ht
   u_char            *start, *pos, *end, *range_end;
   ngx_http_accept_language_t    *al = (ngx_http_accept_language_t *) data;
   ngx_str_t         *l;
+  ngx_table_elt_t   *header;
 
-
-  if ( NULL != r->headers_in.accept_language ) {       
-    start = r->headers_in.accept_language->value.data;
-    end = start + r->headers_in.accept_language->value.len;
+  /* Repeated fields form one preference list in their received order. */
+  for (header = r->headers_in.accept_language; header != NULL;
+       header = header->next)
+  {
+    start = header->value.data;
+    end = start + header->value.len;
 
     while (start < end) {
       while (start < end && (*start == ' ' || *start == '\t')) {start++; }

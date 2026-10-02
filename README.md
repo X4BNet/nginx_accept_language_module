@@ -25,6 +25,8 @@ When truncation leaves a single-letter or single-digit subtag at the end, that s
 
 Lookup only selects complete configured tags: `de` does not select `de-DE`. The selected value retains its configured spelling. A wildcard (`*`) is skipped so subsequent preferences can be tried; if nothing matches, the first configured locale is returned. Extended ranges such as `de-*-DE` and malformed basic ranges are ignored.
 
+Repeated `Accept-Language` fields are processed in their received order, as one comma-separated preference list. All preferences in an earlier field are tried before proceeding to the next field.
+
 ### Caveat
 
 Preferences are processed in header order. Quality (`q`) values are discarded, including `q=0`, so callers must supply preferences in the desired order and omit unacceptable ranges. RFC 4647 defines language matching separately from the priority-list syntax; this module does not implement HTTP quality weighting.
@@ -74,7 +76,7 @@ cpanm Test::Nginx
 TEST_NGINX_BINARY=/path/to/nginx prove -v t/*.t
 ```
 
-The suite covers defaults, RFC 4647 lookup and singleton truncation, case-insensitive matching, wildcards, malformed ranges, ordered preferences, quality suffixes, HTTP-only configuration, and sharing across servers and locations. It starts its own nginx on port 1984; set `TEST_NGINX_SERVER_PORT` to use another port.
+The suite covers defaults, RFC 4647 lookup and singleton truncation, case-insensitive matching, wildcards, malformed ranges, ordered preferences, repeated header fields, quality suffixes, HTTP-only configuration, and sharing across servers and locations. It starts its own nginx on port 1984; set `TEST_NGINX_SERVER_PORT` to use another port.
 
 GitHub Actions builds nginx 1.26.3 and 1.30.5 with the module and runs the suite on pushes and pull requests. The workflow can also be started manually.
 

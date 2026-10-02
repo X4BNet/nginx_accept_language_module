@@ -166,3 +166,113 @@ pl
 ["Accept-Language: ja", "Accept-Language: pl", ""]
 --- response_body eval
 ["ja\n", "pl\n", "en\n"]
+
+
+=== TEST 18: a supported language in the second field is selected
+--- request
+GET /language
+--- more_headers
+Accept-Language: fr
+Accept-Language: ja
+--- response_body
+ja
+
+
+=== TEST 19: all repeated fields are searched in order regardless of name casing
+--- request
+GET /language
+--- more_headers
+Accept-Language: fr
+accept-language: *
+ACCEPT-LANGUAGE: PL
+Accept-Language: ja
+--- response_body
+pl
+
+
+=== TEST 20: repeated fields behave like a single comma-separated field
+--- pipelined_requests eval
+["GET /language", "GET /language"]
+--- more_headers eval
+[
+    "Accept-Language: fr,es;q=0.9\nAccept-Language: pl;q=0.8,ja;q=0.7",
+    "Accept-Language: fr,es;q=0.9,pl;q=0.8,ja;q=0.7",
+]
+--- response_body eval
+["pl\n", "pl\n"]
+
+
+=== TEST 21: empty fields do not prevent matching later fields
+--- request
+GET /language
+--- more_headers eval
+"Accept-Language:\nAccept-Language: \t\nAccept-Language: ja"
+--- response_body
+ja
+
+
+=== TEST 22: a fallback in an earlier field wins over a later exact match
+--- request
+GET /language
+--- more_headers
+Accept-Language: ja-JP
+Accept-Language: pl
+--- response_body
+ja
+
+
+=== TEST 23: later fields use RFC 4647 fallback and case-insensitive matching
+--- request
+GET /language
+--- more_headers
+Accept-Language: fr-FR
+Accept-Language: PT-BR-x-private
+Accept-Language: ja
+--- response_body
+pt-br
+
+
+=== TEST 24: quality suffixes do not reorder preferences across fields
+--- request
+GET /language
+--- more_headers
+Accept-Language: pl;q=0.1
+Accept-Language: ja;q=1.0
+--- response_body
+pl
+
+
+=== TEST 25: repeated fields remain independent across requests on a connection
+--- pipelined_requests eval
+[("GET /language") x 5]
+--- more_headers eval
+[
+    "Accept-Language: fr\nAccept-Language: ja",
+    "Accept-Language: pl",
+    "",
+    "Accept-Language: ja-*,ja-\nAccept-Language: PT-br",
+    "Accept-Language: fr\nAccept-Language: de-DE\nAccept-Language: *",
+]
+--- response_body eval
+["ja\n", "pl\n", "en\n", "pt-br\n", "en\n"]
+
+
+=== TEST 26: field boundaries separate tokens instead of joining their bytes
+--- request
+GET /language
+--- more_headers
+Accept-Language: pt-
+Accept-Language: br,ja
+--- response_body
+ja
+
+
+=== TEST 27: unrelated fields between language fields do not affect selection
+--- request
+GET /language
+--- more_headers eval
+"Accept-Language: fr\n"
+    . CORE::join("\n", map { "X-Filler-$_: ignored" } 1..40)
+    . "\nAccept-Language: pl\nAccept-Language: ja"
+--- response_body
+pl
